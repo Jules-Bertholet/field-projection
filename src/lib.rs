@@ -1,6 +1,7 @@
-#![no_std]
+#![feature(adt_const_params)]
 #![cfg_attr(doc_cfg, feature(doc_cfg))]
 #![warn(unsafe_op_in_unsafe_fn)]
+#![no_std]
 
 use core::mem::MaybeUninit;
 
@@ -11,8 +12,16 @@ pub use pin::*;
 
 /// Representation of a field name.
 ///
-/// A field name `x` is represented with `FieldName<{field_name_hash("x")}>`.
-pub struct FieldName<const N: u64>(());
+/// A field name `x` is represented with `FieldId(field_name_hash("x"))`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FieldId(u64);
+
+impl FieldId {
+    #[doc(hidden)]
+    pub const fn from_hash(hash: u64) -> Self {
+        Self(hash)
+    }
+}
 
 pub use const_fnv1a_hash::fnv1a_hash_str_64 as field_name_hash;
 
@@ -23,7 +32,7 @@ pub use const_fnv1a_hash::fnv1a_hash_str_64 as field_name_hash;
 /// The `map` function must be implemented such that it returns a pointer to the field.
 ///
 /// This trait should not be implemented manually; instead, use the `#[derive(Field)]` instead.
-pub unsafe trait Field<Base> {
+pub unsafe trait FieldInfo<const F: FieldId> {
     /// The type of the field.
     type Type: ?Sized;
     /// The name of the field.
@@ -33,13 +42,13 @@ pub unsafe trait Field<Base> {
     ///
     /// # Safety
     /// `ptr` must be a non-null and aligned pointer to `Self::Base`.
-    unsafe fn map(ptr: *const Base) -> *const Self::Type;
+    unsafe fn map(ptr: *const Self) -> *const Self::Type;
 }
 
 /// Trait for a wrapper type that can be projected to a field.
 ///
 /// `F` is a descriptor of a field (`FieldName` with some generic parameters).
-pub trait Projectable<T, F: Field<T>> {
+pub trait Projectable<T: FieldInfo<F>, const F: FieldId> {
     /// Type of the wrapped projected field.
     type Target;
 
@@ -59,32 +68,32 @@ pub trait Projectable<T, F: Field<T>> {
     }
 }
 
-impl<'a, T, F> Projectable<T, F> for &'a MaybeUninit<T>
+impl<'a, T, const F: FieldId> Projectable<T, F> for &'a MaybeUninit<T>
 where
-    F: Field<T>,
-    F::Type: Sized + 'a,
+    T: FieldInfo<F>,
+    T::Type: Sized + 'a,
 {
-    type Target = &'a MaybeUninit<F::Type>;
+    type Target = &'a MaybeUninit<T::Type>;
 
     unsafe fn project(self) -> Self::Target {
         // SAFETY: Projecting through trusted `F::map`.
-        unsafe { &*F::map(self.as_ptr()).cast::<MaybeUninit<F::Type>>() }
+        unsafe { &*T::map(self.as_ptr()).cast::<MaybeUninit<T::Type>>() }
     }
 }
 
-impl<'a, T, F> Projectable<T, F> for &'a mut MaybeUninit<T>
+impl<'a, T, const F: FieldId> Projectable<T, F> for &'a mut MaybeUninit<T>
 where
-    F: Field<T>,
-    F::Type: Sized + 'a,
+    T: FieldInfo<F>,
+    T::Type: Sized + 'a,
 {
-    type Target = &'a mut MaybeUninit<F::Type>;
+    type Target = &'a mut MaybeUninit<T::Type>;
 
     unsafe fn project(self) -> Self::Target {
         // SAFETY: Projecting through trusted `F::map`.
         unsafe {
-            &mut *F::map(self.as_mut_ptr())
+            &mut *T::map(self.as_mut_ptr())
                 .cast_mut()
-                .cast::<MaybeUninit<F::Type>>()
+                .cast::<MaybeUninit<T::Type>>()
         }
     }
 }
@@ -96,7 +105,7 @@ macro_rules! project {
             __expr => unsafe {
                 $crate::Projectable::<
                     _,
-                    $crate::FieldName<{ $crate::field_name_hash(core::stringify!($b)) }>,
+                    { $crate::FieldId::from_hash($crate::field_name_hash(core::stringify!($b))) },
                 >::project_with_check(__expr, |__check| {
                     let _ = __check.$b;
                 })
